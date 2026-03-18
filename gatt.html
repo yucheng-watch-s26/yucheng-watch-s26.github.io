@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>HR</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0d0f0e; color: #c8d4c0; font-family: 'Courier New', monospace; font-size: 13px; height: 100vh; display: flex; flex-direction: column; }
+
+.top { display: flex; align-items: center; gap: 12px; padding: 0 16px; height: 44px; border-bottom: 1px solid #1f2420; background: #131614; flex-shrink: 0; }
+.led { width: 8px; height: 8px; border-radius: 50%; background: #3a4038; }
+.led.on  { background: #39ff6e; box-shadow: 0 0 8px #39ff6e; }
+.led.err { background: #ff4444; }
+.led.busy { background: #ffb23f; animation: blink .5s infinite; }
+@keyframes blink { 50% { opacity: .3; } }
+.name { flex: 1; color: #5a6858; }
+.btn { font-family: 'Courier New', monospace; font-size: 12px; background: transparent; border: 1px solid #1f2420; color: #5a6858; padding: 5px 12px; cursor: pointer; }
+.btn:hover { border-color: #39ff6e; color: #39ff6e; }
+.btn.red:hover { border-color: #ff4444; color: #ff4444; }
+
+.hr-block { padding: 32px 24px; border-bottom: 1px solid #1f2420; flex-shrink: 0; }
+.hr-label { font-size: 10px; letter-spacing: 2px; text-transform: uppercase; color: #5a6858; margin-bottom: 8px; }
+.hr-val { font-size: 96px; line-height: 1; font-weight: bold; color: #3a4038; }
+.hr-val.live { color: #39ff6e; }
+.hr-val.warn { color: #ffb23f; }
+.hr-unit { font-size: 12px; color: #5a6858; margin-top: 4px; }
+
+.log { flex: 1; overflow-y: auto; padding: 8px 16px; font-size: 11px; line-height: 1.8; }
+.log::-webkit-scrollbar { width: 3px; }
+.log::-webkit-scrollbar-thumb { background: #1f2420; }
+.row { display: grid; grid-template-columns: 64px 1fr; gap: 8px; }
+.t { color: #5a6858; }
+.m { color: #c8d4c0; word-break: break-all; }
+.row.ok  .m { color: #39ff6e; }
+.row.err .m { color: #ff4444; }
+.row.rx  .m { color: #7ab8ff; }
+
+#ov { position: fixed; inset: 0; background: #0d0f0e; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; }
+#ov.gone { display: none; }
+.ov-title { font-size: 32px; letter-spacing: 6px; color: #39ff6e; }
+.ov-btn { font-family: 'Courier New', monospace; font-size: 12px; letter-spacing: 2px; border: 1px solid #39ff6e; color: #39ff6e; background: transparent; padding: 11px 32px; cursor: pointer; }
+.ov-btn:hover { background: rgba(57,255,110,.08); }
+.ov-note { font-size: 10px; color: #5a6858; text-align: center; line-height: 2; }
+</style>
+</head>
+<body>
+
+<div id="ov">
+  <div class="ov-title">HeartRate</div>
+  <button class="ov-btn" onclick="doConnect()">Connect Watch</button>
+  <div class="ov-note">Chrome / Edge<br>Filter: Heart Rate Service (0x180d)</div>
+</div>
+
+<div class="top">
+  <div class="led" id="led"></div>
+  <div class="name" id="name">—</div>
+  <button class="btn red" id="bdis" onclick="doDisconnect()" style="display:none">Disconnect</button>
+</div>
+
+<div class="hr-block">
+  <div class="hr-label">Heart Rate</div>
+  <div class="hr-val" id="hr">—</div>
+  <div class="hr-unit">BPM</div>
+</div>
+
+<div class="log" id="log"></div>
+
+<script>
+let dev, server;
+
+async function doConnect() {
+  if (!navigator.bluetooth) { log('Web Bluetooth not supported', 'err'); return; }
+  led('busy');
+  try {
+    dev = await navigator.bluetooth.requestDevice({
+      filters: [{ services: ['0000180d-0000-1000-8000-00805f9b34fb'] }]
+    });
+    dev.addEventListener('gattserverdisconnected', onDis);
+    log('Connecting...');
+    server = await dev.gatt.connect();
+    log('GATT connected', 'ok');
+
+    const svc  = await server.getPrimaryService('0000180d-0000-1000-8000-00805f9b34fb');
+    const char = await svc.getCharacteristic('00002a37-0000-1000-8000-00805f9b34fb');
+    await char.startNotifications();
+    char.addEventListener('characteristicvaluechanged', onHR);
+    log('Subscribed to 0x2a37', 'ok');
+    log('Wear the watch — data will appear automatically', 'ok');
+
+    document.getElementById('ov').classList.add('gone');
+    document.getElementById('name').textContent = dev.name || dev.id;
+    document.getElementById('bdis').style.display = '';
+    led('on');
+  } catch(e) {
+    if (e.name !== 'NotFoundError') log(e.message, 'err');
+    led('err');
+  }
+}
+
+function onHR(e) {
+  const dv = e.target.value;
+  const flags = dv.getUint8(0);
+  const hr = (flags & 1) ? dv.getUint16(1, true) : dv.getUint8(1);
+  const warn = hr < 50 || hr > 130;
+
+  const el = document.getElementById('hr');
+  el.textContent = hr;
+  el.className = 'hr-val ' + (warn ? 'warn' : 'live');
+
+  const raw = Array.from(new Uint8Array(dv.buffer)).map(b => b.toString(16).padStart(2,'0').toUpperCase()).join(' ');
+  log(`${hr} BPM  raw: ${raw}`, 'rx');
+}
+
+function onDis() {
+  led('err');
+  log('Disconnected', 'err');
+  document.getElementById('name').textContent = '—';
+  document.getElementById('bdis').style.display = 'none';
+  document.getElementById('ov').classList.remove('gone');
+  document.getElementById('hr').className = 'hr-val';
+  document.getElementById('hr').textContent = '—';
+}
+
+function doDisconnect() { dev?.gatt?.disconnect(); }
+
+function log(msg, type) {
+  const el = document.getElementById('log');
+  const t = new Date().toISOString().slice(11,19);
+  const r = document.createElement('div');
+  r.className = 'row ' + (type || '');
+  r.innerHTML = `<span class="t">${t}</span><span class="m">${msg}</span>`;
+  el.appendChild(r);
+  while (el.children.length > 300) el.removeChild(el.firstChild);
+  el.scrollTop = el.scrollHeight;
+}
+
+function led(s) { document.getElementById('led').className = 'led ' + s; }
+</script>
+</body>
+</html>
