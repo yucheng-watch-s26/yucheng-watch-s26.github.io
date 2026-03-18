@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>YCBT</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #0d0f0e; color: #c8d4c0;
+  font-family: 'Courier New', monospace; font-size: 13px;
+  height: 100vh; display: flex; flex-direction: column;
+}
+.top {
+  display: flex; align-items: center; gap: 12px;
+  padding: 0 16px; height: 44px;
+  border-bottom: 1px solid #1f2420; background: #131614; flex-shrink: 0;
+}
+.led { width: 8px; height: 8px; border-radius: 50%; background: #3a4038; flex-shrink: 0; }
+.led.on   { background: #39ff6e; box-shadow: 0 0 8px #39ff6e; }
+.led.err  { background: #ff4444; }
+.led.busy { background: #ffb23f; animation: blink .5s infinite; }
+@keyframes blink { 50% { opacity: .3; } }
+.devname { flex: 1; color: #5a6858; }
+.btn {
+  font-family: 'Courier New', monospace; font-size: 12px;
+  background: transparent; border: 1px solid #1f2420; color: #5a6858;
+  padding: 5px 12px; cursor: pointer; white-space: nowrap;
+}
+.btn:hover:not(:disabled) { border-color: #39ff6e; color: #39ff6e; }
+.btn.red:hover:not(:disabled) { border-color: #ff4444; color: #ff4444; }
+.btn:disabled { opacity: .3; cursor: default; }
+.body { flex: 1; display: grid; grid-template-columns: 210px 1fr; overflow: hidden; }
+.metrics { border-right: 1px solid #1f2420; overflow-y: auto; }
+.metric { padding: 13px 16px; border-bottom: 1px solid #1f2420; }
+.m-label { font-size: 10px; letter-spacing: 2px; text-transform: uppercase; color: #5a6858; margin-bottom: 3px; }
+.m-val   { font-size: 38px; line-height: 1; font-weight: bold; color: #3a4038; transition: color .3s; }
+.m-val.sm { font-size: 26px; }
+.m-val.live { color: #39ff6e; }
+.m-val.warn { color: #ffb23f; }
+.m-unit  { font-size: 10px; color: #5a6858; margin-top: 2px; }
+.logwrap { display: flex; flex-direction: column; overflow: hidden; }
+.log { flex: 1; overflow-y: auto; padding: 6px 12px; font-size: 11px; line-height: 1.8; }
+.log::-webkit-scrollbar { width: 3px; }
+.log::-webkit-scrollbar-thumb { background: #1f2420; }
+.row { display: grid; grid-template-columns: 64px 1fr; gap: 8px; }
+.t { color: #5a6858; }
+.m { color: #c8d4c0; word-break: break-all; }
+.row.ok  .m { color: #39ff6e; }
+.row.err .m { color: #ff4444; }
+.row.rx  .m { color: #7ab8ff; }
+#ov {
+  position: fixed; inset: 0; background: #0d0f0e;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px;
+  z-index: 10;
+}
+#ov.gone { display: none; }
+.ov-title { font-size: 32px; letter-spacing: 6px; color: #39ff6e; }
+.ov-btn {
+  font-family: 'Courier New', monospace; font-size: 12px; letter-spacing: 2px;
+  border: 1px solid #39ff6e; color: #39ff6e; background: transparent;
+  padding: 11px 32px; cursor: pointer;
+}
+.ov-btn:hover { background: rgba(57,255,110,.08); }
+.ov-note { font-size: 10px; color: #5a6858; text-align: center; line-height: 2; }
+</style>
+</head>
+<body>
+
+<div id="ov">
+  <div class="ov-title">YCBT</div>
+  <button class="ov-btn" onclick="doConnect()">Connect</button>
+  <div class="ov-note">Chrome / Edge · localhost or HTTPS</div>
+</div>
+
+<div class="top">
+  <div class="led" id="led"></div>
+  <div class="devname" id="devname">—</div>
+  <button class="btn red" id="bdis" onclick="doDisconnect()" style="display:none">Disconnect</button>
+</div>
+
+<div class="body">
+  <div class="metrics">
+    <div class="metric">
+      <div class="m-label">Heart Rate</div>
+      <div class="m-val" id="vHR">—</div>
+      <div class="m-unit">BPM</div>
+    </div>
+    <div class="metric">
+      <div class="m-label">Blood Pressure</div>
+      <div class="m-val sm" id="vBP">—</div>
+      <div class="m-unit">mmHg  sys/dia</div>
+    </div>
+    <div class="metric">
+      <div class="m-label">SpO₂</div>
+      <div class="m-val" id="vSPO2">—</div>
+      <div class="m-unit">%</div>
+    </div>
+
+  </div>
+  <div class="logwrap">
+    <div class="log" id="log"></div>
+  </div>
+</div>
+
+<script>
+const UUID = {
+  YC_SVC:  'be940000-7333-be46-b7ae-689e71722bd5',
+  YC_W:    'be940001-7333-be46-b7ae-689e71722bd5',
+  YC_N:    'be940003-7333-be46-b7ae-689e71722bd5',
+  HR_SVC:  '0000180d-0000-1000-8000-00805f9b34fb',
+  HR_MEAS: '00002a37-0000-1000-8000-00805f9b34fb',
+  BAT_SVC: '0000180f-0000-1000-8000-00805f9b34fb',
+  BAT:     '00002a19-0000-1000-8000-00805f9b34fb',
+};
+
+const DT = {
+  TIME:    0x0100,
+  HR:      0x0301,
+  BLOOD:   0x0302,
+  SPO2:    0x0303,
+  STREAM:  0x0309,
+  BP_MEAS: 0x032E,
+  GET_ALL: 0x0220,
+  GET_SPO2:0x0211,
+  H_BLOOD: 0x0508,
+  H_HEART: 0x0506,
+  H_ALL:   0x0509,
+  H_SPO2:  0x051A,
+  H_COMP:  0x052F,
+};
+
+// cmds_on — идентично main.py default mode
+const CMDS_ON = [
+  [DT.HR,      [1]],
+  [DT.BLOOD,   [1]],
+  [DT.SPO2,    [1]],
+  [DT.STREAM,  [1]],
+  [DT.BP_MEAS, [1, 115, 80, 70, 170, 70, 30, 0]],
+];
+
+const CMDS_OFF = [
+  [DT.BP_MEAS, [0, 115, 80, 70, 170, 70, 30, 0]],
+  [DT.STREAM,  [0]],
+  [DT.SPO2,    [0]],
+  [DT.BLOOD,   [0]],
+  [DT.HR,      [0]],
+];
+
+// poll — идентично main.py
+const POLL_DTS = [
+  DT.GET_ALL, DT.GET_SPO2,
+  DT.H_BLOOD, DT.H_HEART, DT.H_ALL, DT.H_SPO2, DT.H_COMP,
+];
+
+const REARM_INTERVAL = 60000; // ms
+
+// ── CRC16 — точная копия main.py _crc16 ──────────────────────────────
+function crc16(data) {
+  let s = 0xFFFF;
+  for (const b of data) {
+    s = (((s << 8) & 0xFF00) | ((s >> 8) & 0xFF)) ^ (b & 0xFF);
+    s ^= (s & 0xFF) >> 4;
+    s ^= (s << 12) & 0xFFFF;
+    s ^= ((s & 0xFF) << 5) & 0xFFFF;
+  }
+  return s & 0xFFFF;
+}
+
+// ── Frame builder — точная копия main.py frame() ─────────────────────
+function buildFrame(dt, payload) {
+  payload = Array.isArray(payload) ? new Uint8Array(payload) :
+            payload instanceof Uint8Array ? payload : new Uint8Array(0);
+  const g = (dt >> 8) & 0xFF, k = dt & 0xFF;
+  const n = payload.length + 6;
+  const hdr = new Uint8Array([g, k, n & 0xFF, n >> 8, ...payload]);
+  const c = crc16(hdr);
+  return new Uint8Array([...hdr, c & 0xFF, c >> 8]);
+}
+
+// ── Frame parser — точная копия main.py parse() ──────────────────────
+function parseFrame(buf) {
+  const b = new Uint8Array(buf instanceof ArrayBuffer ? buf : buf.buffer);
+  if (b.length < 6) return null;
+  const g = b[0], k = b[1];
+  const n = b[2] | (b[3] << 8);
+  if (n !== b.length) return null;
+  return { dt: (g << 8) | k, g, k, p: b.slice(4, n - 2), hex: toHex(b) };
+}
+
+function toHex(b) {
+  return Array.from(b).map(x => x.toString(16).padStart(2,'0').toUpperCase()).join(' ');
+}
+
+// ════════════════════════════════════════════════════════════════════
+// ЕДИНСТВЕННАЯ ТОЧКА ОБНОВЛЕНИЯ МЕТРИК
+// Добавь sendToBackend(data) сюда
+// ════════════════════════════════════════════════════════════════════
+function updateMetrics(data) {
+  // data = { hr, sbp, dbp, spo2, bat, source }
+  // Merge incoming data — keep last known value when new value is 0 or undefined
+  if (data.hr   > 0)  lastKnown.hr   = data.hr;
+  if (data.sbp  > 0)  lastKnown.sbp  = data.sbp;
+  if (data.dbp  > 0)  lastKnown.dbp  = data.dbp;
+  if (data.spo2 > 0)  lastKnown.spo2 = data.spo2;
+
+  const effective = {
+    hr:     lastKnown.hr,
+    sbp:    lastKnown.sbp,
+    dbp:    lastKnown.dbp,
+    spo2:   lastKnown.spo2,
+    source: data.source,
+    ts:     Date.now(),
+  };
+
+  console.log('[updateMetrics]', JSON.stringify(effective));
+
+  if (effective.hr   !== undefined) setVal('vHR',   effective.hr,  effective.hr < 50 || effective.hr > 130);
+  if (effective.sbp  !== undefined && effective.dbp !== undefined)
+    setVal('vBP', `${effective.sbp}/${effective.dbp}`, effective.sbp > 140 || effective.sbp < 90, true);
+  if (effective.spo2 !== undefined) setVal('vSPO2', effective.spo2, effective.spo2 < 95);
+
+  // sendToBackend(effective);
+}
+
+// async function sendToBackend(data) {
+//   await fetch('https://your-backend/api/metrics', {
+//     method: 'POST',
+//     headers: { 'Content-Type': 'application/json' },
+//     body: JSON.stringify({ ...data, ts: Date.now() })
+//   });
+// }
+
+// ── Dispatch — точная копия main.py show() ────────────────────────────
+function dispatch(f) {
+  const p = f.p;
+  if (p.length === 1 && p[0] === 0xFC) return;
+
+  switch (f.dt) {
+    case 0x0601:
+      if (p[0] > 0) updateMetrics({ hr: p[0], source: 'yc' });
+      break;
+    case 0x0603:
+      if (p.length >= 2) updateMetrics({ sbp: p[0], dbp: p[1], hr: p[2] || undefined, source: 'yc' });
+      break;
+    case 0x0602:
+      if (p[0] > 0) updateMetrics({ spo2: p[0], source: 'yc' });
+      break;
+    case 0x060A:
+      if (p.length >= 11) updateMetrics({ hr: p[7], sbp: p[8], dbp: p[9], spo2: p[10], source: 'comprehensive' });
+      break;
+    case 0x0410:
+      if (p.length >= 3 && p[0] === 0) updateMetrics({ sbp: p[1], dbp: p[2], source: 'bp_result' });
+      break;
+    case 0x040E:
+      log(`Done type=${p[0]} ${p[1] === 1 ? 'OK' : 'FAIL'}`);
+      break;
+    // Health_HistoryBlood: records 8 bytes [ts(4), status(1), SBP(1), DBP(1), HR(1)]
+    case 0x0517: {
+      for (let i = 0; i + 7 < p.length; i += 8) {
+        const sbp = p[i+5], dbp = p[i+6], hr = p[i+7];
+        if (sbp > 0 && dbp > 0) updateMetrics({ sbp, dbp, hr: hr||undefined, source: 'history_bp' });
+      }
+      break;
+    }
+    // Health_HistoryHeart: records 6 bytes [ts(4), status(1), HR(1)]
+    case 0x0515: {
+      for (let i = 0; i + 5 < p.length; i += 6) {
+        const hr = p[i+5];
+        if (hr > 0) updateMetrics({ hr, source: 'history_hr' });
+      }
+      break;
+    }
+    // Health_HistoryAll: records 20 bytes, p[6]=HR p[7]=SBP p[8]=DBP p[9]=SpO2
+    case 0x0518: {
+      for (let i = 0; i + 19 < p.length; i += 20) {
+        updateMetrics({
+          hr:   p[i+6]||undefined,
+          sbp:  p[i+7]||undefined,
+          dbp:  p[i+8]||undefined,
+          spo2: p[i+9]||undefined,
+          source: 'history_all'
+        });
+      }
+      break;
+    }
+    // Health_HistoryComprehensive
+    case 0x052F: {
+      if (p.length >= 10)
+        updateMetrics({ hr: p[6]||undefined, sbp: p[7]||undefined, dbp: p[8]||undefined, spo2: p[9]||undefined, source: 'history_comp' });
+      break;
+    }
+    default:
+      log(`RX [${f.dt.toString(16).toUpperCase()}] ${f.hex}`, 'rx');
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// BLE
+// ════════════════════════════════════════════════════════════════════
+let device, server, writeChar;
+let pollTimer = null, rearmTimer = null;
+const lastKnown = { hr: undefined, sbp: undefined, dbp: undefined, spo2: undefined };
+
+async function doConnect() {
+  if (!navigator.bluetooth) { log('Web Bluetooth not supported', 'err'); return; }
+  led('busy');
+  try {
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [UUID.HR_SVC] }],
+      optionalServices: [UUID.YC_SVC, UUID.YC_W, UUID.YC_N, UUID.BAT_SVC],
+    });
+    device.addEventListener('gattserverdisconnected', onDisconnect);
+    document.getElementById('ov').classList.add('gone');
+    log(`Selected: ${device.name || device.id}`);
+
+    server = await device.gatt.connect();
+    log('GATT connected', 'ok');
+
+    // YC custom service
+    let ycOk = false;
+    try {
+      const ycSvc = await server.getPrimaryService(UUID.YC_SVC);
+      writeChar = await ycSvc.getCharacteristic(UUID.YC_W);
+      await writeChar.startNotifications();
+      writeChar.addEventListener('characteristicvaluechanged', onYCData);
+      log('be940001 OK', 'ok');
+      ycOk = true;
+      try {
+        const n2 = await ycSvc.getCharacteristic(UUID.YC_N);
+        await n2.startNotifications();
+        n2.addEventListener('characteristicvaluechanged', onYCData);
+        log('be940003 OK', 'ok');
+      } catch {}
+    } catch(e) { log(`YC: ${e.message}`); }
+
+    // Standard GATT HR — always
+    try {
+      const hrSvc  = await server.getPrimaryService(UUID.HR_SVC);
+      const hrChar = await hrSvc.getCharacteristic(UUID.HR_MEAS);
+      await hrChar.startNotifications();
+      hrChar.addEventListener('characteristicvaluechanged', onGattHR);
+      log('GATT HR 0x2a37 OK', 'ok');
+    } catch(e) { log(`GATT HR: ${e.message}`, 'err'); }
+
+
+
+    if (ycOk) {
+      // Sync time
+      const t = Math.floor(Date.now() / 1000) - 946684800;
+      const tb = new Uint8Array(4);
+      new DataView(tb.buffer).setUint32(0, t, true);
+      await send(DT.TIME, tb);
+      log('Time synced', 'ok');
+
+      // cmds_on — запустить все измерения
+      for (const [dt, pl] of CMDS_ON) {
+        await send(dt, pl);
+        await sleep(50);
+      }
+      log('Measurements started', 'ok');
+
+      // poll loop — каждые 500ms как в main.py
+      startPoll();
+
+      // rearm каждые 60 секунд
+      rearmTimer = setInterval(rearm, REARM_INTERVAL);
+    }
+
+    document.getElementById('devname').textContent = device.name || device.id;
+    document.getElementById('bdis').style.display = '';
+    led('on');
+    log('Ready', 'ok');
+
+  } catch(e) {
+    if (e.name !== 'NotFoundError') log(e.message, 'err');
+    console.error(e);
+    led('err');
+  }
+}
+
+function startPoll() {
+  if (pollTimer) return;
+  let i = 0;
+  pollTimer = setInterval(async () => {
+    if (!writeChar) return;
+    await send(POLL_DTS[i % POLL_DTS.length], []);
+    i++;
+  }, 500);
+}
+
+async function rearm() {
+  if (!writeChar) return;
+  log('>> re-arming');
+  for (const [dt, pl] of CMDS_ON) {
+    await send(dt, pl);
+    await sleep(50);
+  }
+}
+
+function onDisconnect() {
+  clearInterval(pollTimer); pollTimer = null;
+  clearInterval(rearmTimer); rearmTimer = null;
+  led('err'); log('Disconnected', 'err');
+  document.getElementById('devname').textContent = '—';
+  document.getElementById('bdis').style.display = 'none';
+  document.getElementById('ov').classList.remove('gone');
+  writeChar = null;
+}
+
+function doDisconnect() {
+  for (const [dt, pl] of CMDS_OFF) send(dt, pl);
+  setTimeout(() => device?.gatt?.disconnect(), 300);
+}
+
+function onYCData(e) {
+  const f = parseFrame(e.target.value.buffer);
+  if (!f) { log(`malformed: ${toHex(new Uint8Array(e.target.value.buffer))}`, 'err'); return; }
+  dispatch(f);
+}
+
+function onGattHR(e) {
+  const dv = e.target.value;
+  const flags = dv.getUint8(0);
+  const hr = (flags & 1) ? dv.getUint16(1, true) : dv.getUint8(1);
+  updateMetrics({ hr, source: 'gatt' });
+  log(`GATT HR: ${hr} BPM  ${toHex(new Uint8Array(dv.buffer))}`, 'rx');
+}
+
+async function send(dt, payload) {
+  if (!writeChar) return;
+  const frame = buildFrame(dt, payload);
+  log(`TX [${dt.toString(16).toUpperCase()}] ${toHex(frame)}`);
+  try {
+    await writeChar.writeValueWithoutResponse(frame.buffer);
+  } catch {
+    try { await writeChar.writeValueWithResponse(frame.buffer); }
+    catch(e) { log(`write err: ${e.message}`, 'err'); }
+  }
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function setVal(id, val, warn, sm) {
+  const el = document.getElementById(id);
+  el.textContent = val;
+  el.className = 'm-val' + (sm ? ' sm' : '') + ' ' + (warn ? 'warn' : 'live');
+}
+
+function log(msg, type) {
+  const el = document.getElementById('log');
+  const t = new Date().toISOString().slice(11,19);
+  const r = document.createElement('div');
+  r.className = 'row ' + (type || '');
+  r.innerHTML = `<span class="t">${t}</span><span class="m">${msg}</span>`;
+  el.appendChild(r);
+  while (el.children.length > 300) el.removeChild(el.firstChild);
+  el.scrollTop = el.scrollHeight;
+}
+
+function led(s) { document.getElementById('led').className = 'led ' + s; }
+
+log('Ready');
+</script>
+<a href="./gatt.html" style="display: none;">gatt.html</a>
+</body>
+</html>
